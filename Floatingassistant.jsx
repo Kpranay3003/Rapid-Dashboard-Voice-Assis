@@ -197,17 +197,27 @@ If the user wants to open/navigate to a node, include exactly: OPEN_NODE:<node_i
         role: m.role === "assistant" ? "assistant" : "user",
         content: m.text,
       }));
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+
+      // Call YOUR backend /api/chat — which securely proxies to Anthropic
+      const res = await fetch("http://localhost:5000/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          system: systemPrompt,
+          systemPrompt,
           messages: apiMessages,
         }),
       });
+
       const data = await res.json();
+
+      // Handle Anthropic API errors (e.g. invalid key, quota exceeded)
+      if (data.error) {
+        const errMsg = typeof data.error === "string" ? data.error : data.error?.message || "API error";
+        setMessages(prev => [...prev, { role: "assistant", text: `⚠️ ${errMsg}` }]);
+        setChatLoading(false);
+        return;
+      }
+
       const replyText = data.content?.map(c => c.text || "").join("") || "Sorry, I could not respond.";
 
       const openMatch = replyText.match(/OPEN_NODE:([^\s\n]+)/);
@@ -219,8 +229,11 @@ If the user wants to open/navigate to a node, include exactly: OPEN_NODE:<node_i
       } else {
         setMessages(prev => [...prev, { role: "assistant", text: replyText }]);
       }
-    } catch {
-      setMessages(prev => [...prev, { role: "assistant", text: "Connection error. Is the backend running?" }]);
+    } catch (err) {
+      setMessages(prev => [...prev, {
+        role: "assistant",
+        text: "❌ Could not reach the backend. Make sure you ran: node server.cjs"
+      }]);
     }
     setChatLoading(false);
   }, [input, messages, chatLoading, nodesConfig, summaryMap, selectedNode, currentSummary, onNodeSelect]);
