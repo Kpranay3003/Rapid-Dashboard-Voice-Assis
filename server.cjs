@@ -10,7 +10,7 @@ app.use(express.json());
 // ── Your Anthropic API key ──────────────────────────────────
 // Replace the value below with your actual key from:
 // https://console.anthropic.com/settings/keys
-const ANTHROPIC_API_KEY = "YOUR_ANTHROPIC_KEY";
+const ANTHROPIC_API_KEY = "YOUR_ANTHROPIC_API_KEY";
 // ────────────────────────────────────────────────────────────
 
 // Load Excel once at startup
