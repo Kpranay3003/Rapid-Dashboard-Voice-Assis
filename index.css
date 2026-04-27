@@ -1,0 +1,38 @@
+/* ── index.css ────────────────────────────────────────────────────────────
+   Global reset / font baseline.
+   NOTE: Previously had width:1126px on #root which broke the full-width
+   dashboard layout. Removed — layout is now controlled by styles.css.
+──────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  --sans: system-ui, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+#root {
+  /* Full width — dashboard needs to fill the viewport */
+  width: 100%;
+  min-height: 100svh;
+}
+
+h1, h2, h3, h4 {
+  margin: 0;
+}
+
+p { margin: 0; }
