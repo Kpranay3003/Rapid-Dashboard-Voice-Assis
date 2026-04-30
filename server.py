@@ -40,11 +40,11 @@ EXCEL_PATH = "data.xlsx"
 SHEET_CACHE: dict[str, list[dict]] = {}
 
 def load_excel_to_cache():
-    print(f"\n📂 Loading {EXCEL_PATH} into memory...")
+    print(f"\n Loading {EXCEL_PATH} into memory...")
     try:
         wb = openpyxl.load_workbook(EXCEL_PATH, read_only=True, data_only=True)
     except FileNotFoundError:
-        print(f"❌ ERROR: {EXCEL_PATH} not found. Place it next to server.py")
+        print(f" ERROR: {EXCEL_PATH} not found. Place it next to server.py")
         return
 
     for sheet_name in wb.sheetnames:
@@ -69,7 +69,7 @@ def load_excel_to_cache():
         print(f"   ✅ '{sheet_name}' — {len(records):,} rows cached")
 
     wb.close()
-    print(f"\n🚀 All sheets loaded. Serving from memory.\n")
+    print(f"\n All sheets loaded. Serving from memory.\n")
 
 load_excel_to_cache()
 
