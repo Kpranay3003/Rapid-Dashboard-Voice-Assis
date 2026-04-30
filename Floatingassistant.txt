@@ -1,0 +1,362 @@
+/**
+ * FloatingAssistant.jsx
+ * Bottom-right floating widget:
+ *   🤖 Chat  — AI chatbot via Anthropic (calls /api/chat on backend)
+ *   🎤 Voice — STT + TTS, auto-opens nodes, reads live data
+ */
+import { useState, useEffect, useRef, useCallback } from "react";
+import "./FloatingAssistant.css";
+import { getSummary } from "../services/api";
+
+const BACKEND = "http://localhost:5000";
+
+/* ─── helpers ──────────────────────────────────────────────── */
+const norm = (s = "") =>
+  s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+
+function matchNode(transcript, nodes) {
+  const t = norm(transcript);
+  for (const n of nodes) if (t.includes(norm(n.id))) return n.id;
+  let best = null, bestScore = 0;
+  for (const n of nodes) {
+    const words = norm(n.label.replace(/\n/g, " ")).split(" ").filter(w => w.length > 2);
+    const hits  = words.filter(w => t.includes(w));
+    const score = words.length ? hits.length / words.length : 0;
+    if (score > bestScore && score >= 0.3) { bestScore = score; best = n.id; }
+  }
+  return best;
+}
+
+/* ─── render bold + newlines in chat bubbles ───────────────── */
+function RenderText({ text }) {
+  return (
+    <span>
+      {text.split("\n").map((line, i, arr) => {
+        const parts = line.split(/\*\*(.+?)\*\*/g);
+        return (
+          <span key={i}>
+            {parts.map((p, j) => j % 2 === 1 ? <strong key={j}>{p}</strong> : p)}
+            {i < arr.length - 1 && <br />}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════
+   COMPONENT
+═══════════════════════════════════════════════════════════ */
+export default function FloatingAssistant({
+  nodesConfig, summaryMap, selectedNode, currentSummary, onNodeSelect,
+}) {
+  const [open,         setOpen]         = useState(false);
+  const [tab,          setTab]          = useState("chat");
+
+  /* ── voice state ── */
+  const [listening,    setListening]    = useState(false);
+  const [transcript,   setTranscript]   = useState("");
+  const [voiceReply,   setVoiceReply]   = useState("");
+  const [voiceLoading, setVoiceLoading] = useState(false);
+  const [sttSupported, setSttSupported] = useState(true);
+  const recognitionRef = useRef(null);
+  const synthRef       = useRef(window.speechSynthesis);
+
+  /* ── chat state ── */
+  const [messages, setMessages] = useState([
+    {
+      role: "assistant",
+      text: "👋 Hi! I'm your AI dashboard assistant powered by Claude.\n\nAsk me anything about your supply chain nodes — failures, totals, comparisons, trends, or just say \"open WMS replication\" to navigate.\n\nType **help** for examples.",
+    },
+  ]);
+  const [input,       setInput]       = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef(null);
+
+  /* ── init STT ── */
+  useEffect(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { setSttSupported(false); return; }
+    const rec = new SR();
+    rec.lang = "en-US"; rec.interimResults = true; rec.continuous = false;
+    rec.onresult = (e) => {
+      let interim = "", final = "";
+      for (const r of e.results) {
+        if (r.isFinal) final   += r[0].transcript;
+        else           interim += r[0].transcript;
+      }
+      setTranscript(final || interim);
+      if (final) handleVoiceCommand(final);
+    };
+    rec.onend   = () => setListening(false);
+    rec.onerror = (e) => { setListening(false); setVoiceReply("Mic error: " + e.error); };
+    recognitionRef.current = rec;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /* ── scroll chat to bottom ── */
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  /* ── speak ── */
+  const speak = useCallback((text) => {
+    const synth = synthRef.current;
+    if (!synth) return;
+    synth.cancel();
+    const plain = text.replace(/\*\*/g, "").replace(/[📊✅❌📋📍🔀🟢🔴😊👋⚠️]/g, "");
+    const utt   = new SpeechSynthesisUtterance(plain);
+    utt.rate = 1; utt.pitch = 1; utt.volume = 1;
+    const voices = synth.getVoices();
+    const v = voices.find(v => v.name.includes("Google") || v.lang === "en-US");
+    if (v) utt.voice = v;
+    synth.speak(utt);
+    setVoiceReply(plain.slice(0, 200));
+  }, []);
+
+  /* ── voice command handler ── */
+  const handleVoiceCommand = useCallback(async (text) => {
+    const t = norm(text);
+    if (t.includes("stop") || t.includes("close")) { speak("Stopped."); return; }
+    if (t.includes("list") || t.includes("available")) {
+      speak("Available nodes: " + nodesConfig.map(n => n.label.replace(/\n/g, " ")).join(", "));
+      return;
+    }
+    if (t.includes("how many") || t.includes("summary") || t.includes("status")) {
+      if (!selectedNode) { speak("Please open a node first."); return; }
+      setVoiceLoading(true);
+      try {
+        const s   = await getSummary(selectedNode);
+        const lbl = nodesConfig.find(n => n.id === selectedNode)?.label.replace(/\n/g, " ") || selectedNode;
+        speak(`${lbl}: total ${s.total ?? 0}, success ${s.success ?? 0}, failed ${s.failed ?? 0}.`);
+      } catch { speak("Could not fetch data."); }
+      setVoiceLoading(false);
+      return;
+    }
+    const nodeId = matchNode(text, nodesConfig);
+    if (nodeId) {
+      const lbl = nodesConfig.find(n => n.id === nodeId)?.label.replace(/\n/g, " ") || nodeId;
+      setVoiceLoading(true);
+      try {
+        const s = await getSummary(nodeId);
+        speak(`Opening ${lbl}. Total: ${(s.total ?? 0).toLocaleString()}, Success: ${(s.success ?? 0).toLocaleString()}, Failed: ${(s.failed ?? 0).toLocaleString()}.`);
+        onNodeSelect(nodeId);
+      } catch { speak(`Opening ${lbl}.`); onNodeSelect(nodeId); }
+      setVoiceLoading(false);
+    } else {
+      speak(`No match for "${text}". Try saying a node name.`);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodesConfig, selectedNode, onNodeSelect, speak]);
+
+  /* ── toggle mic ── */
+  const toggleMic = () => {
+    const rec = recognitionRef.current;
+    if (!rec) return;
+    if (listening) { rec.stop(); setListening(false); }
+    else {
+      setTranscript(""); setVoiceReply("");
+      try { rec.start(); setListening(true); } catch (e) { console.error(e); }
+    }
+  };
+
+  /* ── send chat to Anthropic via backend ── */
+  const sendChat = useCallback(async () => {
+    const text = input.trim();
+    if (!text || chatLoading) return;
+    setInput("");
+
+    const userMsg = { role: "user", text };
+    const history = [...messages, userMsg];
+    setMessages(history);
+    setChatLoading(true);
+
+    /* Build rich system prompt with live dashboard context */
+    const nodeList = nodesConfig.map(n =>
+      `- ${n.label.replace(/\n/g, " ")} (id: "${n.id}")`
+    ).join("\n");
+
+    const summaryContext = Object.entries(summaryMap)
+      .map(([id, s]) =>
+        `${id}: total=${s.total ?? 0}, success=${s.success ?? 0}, failed=${s.failed ?? 0}`
+      ).join(" | ");
+
+    const systemPrompt = `You are an intelligent AI assistant for a supply-chain operations dashboard called Rapid Dashboard.
+
+The dashboard tracks 8 nodes in a supply chain flow:
+${nodeList}
+
+Current live summary data for all nodes:
+${summaryContext || "Loading..."}
+
+Currently selected node: ${selectedNode || "none"}
+${selectedNode && currentSummary
+  ? `Selected node stats: total=${currentSummary.total}, success=${currentSummary.success}, failed=${currentSummary.failed}`
+  : ""}
+
+Your capabilities:
+- Answer questions about node performance, failures, success rates
+- Compare nodes and identify bottlenecks
+- Explain what each node does in a supply chain context
+- Give actionable insights based on the data
+- Navigate to a node by replying with OPEN_NODE:<node_id> on its own line
+
+Keep answers concise and data-driven. Use the live numbers provided above.
+If asked to open or navigate to a node, include OPEN_NODE:<node_id> in your response.`;
+
+    try {
+      /* Call YOUR backend /api/chat — never call Anthropic directly from browser */
+      const res = await fetch(`${BACKEND}/api/chat`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemPrompt,
+          messages: history.map(m => ({
+            role:    m.role === "assistant" ? "assistant" : "user",
+            content: m.text,
+          })),
+        }),
+      });
+
+      const data = await res.json();
+
+      /* Handle error responses from backend or Anthropic */
+      if (!res.ok || data.error) {
+        const errMsg = data.detail || data.error?.message || "Something went wrong.";
+        setMessages(prev => [...prev, { role: "assistant", text: `⚠️ ${errMsg}` }]);
+        setChatLoading(false);
+        return;
+      }
+
+      /* Extract text from Anthropic response */
+      const replyText = data.content?.map(c => c.text || "").join("") || "Sorry, no response.";
+
+      /* Check if Claude wants to open a node */
+      const openMatch = replyText.match(/OPEN_NODE:([^\s\n]+)/);
+      if (openMatch) {
+        const nodeId     = openMatch[1].trim();
+        const cleanReply = replyText.replace(/OPEN_NODE:[^\s\n]+/, "").trim() || `Opening ${nodeId}…`;
+        onNodeSelect(nodeId);
+        setMessages(prev => [...prev, { role: "assistant", text: cleanReply }]);
+      } else {
+        setMessages(prev => [...prev, { role: "assistant", text: replyText }]);
+      }
+    } catch {
+      setMessages(prev => [...prev, {
+        role: "assistant",
+        text: "❌ Could not reach the backend.\n\nMake sure you ran:\n**python server.py**",
+      }]);
+    }
+
+    setChatLoading(false);
+  }, [input, messages, chatLoading, nodesConfig, summaryMap, selectedNode, currentSummary, onNodeSelect]);
+
+  /* ── render ── */
+  return (
+    <div className="fa-root">
+      {open && (
+        <div className="fa-panel">
+          {/* Header / tabs */}
+          <div className="fa-panel-header">
+            <div className="fa-tabs">
+              <button
+                className={`fa-tab ${tab === "chat" ? "fa-tab--active" : ""}`}
+                onClick={() => setTab("chat")}
+              >🤖 AI Chat</button>
+              <button
+                className={`fa-tab ${tab === "voice" ? "fa-tab--active" : ""}`}
+                onClick={() => setTab("voice")}
+              >🎤 Voice</button>
+            </div>
+            <button className="fa-close-btn" onClick={() => setOpen(false)}>✕</button>
+          </div>
+
+          {/* ── CHAT TAB ── */}
+          {tab === "chat" && (
+            <div className="fa-chat">
+              <div className="fa-messages">
+                {messages.map((m, i) => (
+                  <div key={i} className={`fa-msg fa-msg--${m.role}`}>
+                    {m.role === "assistant" && <span className="fa-msg-avatar">🤖</span>}
+                    <div className="fa-msg-bubble"><RenderText text={m.text} /></div>
+                    {m.role === "user" && <span className="fa-msg-avatar">👤</span>}
+                  </div>
+                ))}
+                {chatLoading && (
+                  <div className="fa-msg fa-msg--assistant">
+                    <span className="fa-msg-avatar">🤖</span>
+                    <div className="fa-msg-bubble fa-typing"><span /><span /><span /></div>
+                  </div>
+                )}
+                <div ref={chatEndRef} />
+              </div>
+              <div className="fa-input-row">
+                <input
+                  className="fa-input"
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && sendChat()}
+                  placeholder="Ask about nodes, failures, trends…"
+                  disabled={chatLoading}
+                />
+                <button className="fa-send-btn" onClick={sendChat} disabled={chatLoading}>➤</button>
+              </div>
+            </div>
+          )}
+
+          {/* ── VOICE TAB ── */}
+          {tab === "voice" && (
+            <div className="fa-voice">
+              {!sttSupported ? (
+                <div className="fa-unsupported">⚠️ Use Chrome or Edge for voice.</div>
+              ) : (
+                <>
+                  <button
+                    className={`fa-mic-big ${listening ? "fa-mic-big--active" : ""} ${voiceLoading ? "fa-mic-big--loading" : ""}`}
+                    onClick={toggleMic}
+                    disabled={voiceLoading}
+                  >
+                    <span className="fa-mic-icon">{voiceLoading ? "⏳" : listening ? "⏹" : "🎤"}</span>
+                    <span className="fa-mic-label">
+                      {voiceLoading ? "Fetching data…" : listening ? "Listening… tap to stop" : "Tap to speak"}
+                    </span>
+                    {listening && !voiceLoading && <span className="fa-pulse" />}
+                  </button>
+
+                  {transcript && (
+                    <div className="fa-voice-row">
+                      <div className="fa-voice-label">You said</div>
+                      <div className="fa-voice-text">{transcript}</div>
+                    </div>
+                  )}
+                  {voiceReply && (
+                    <div className="fa-voice-row">
+                      <div className="fa-voice-label">Assistant replied</div>
+                      <div className="fa-voice-text fa-voice-reply">{voiceReply}</div>
+                    </div>
+                  )}
+
+                  <div className="fa-hints">
+                    <strong>Try saying:</strong><br />
+                    "open WMS replication"<br />
+                    "how many failed in SAP delivery"<br />
+                    "list nodes"
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* FAB button */}
+      <button
+        className={`fa-fab ${open ? "fa-fab--open" : ""} ${listening ? "fa-fab--listening" : ""}`}
+        onClick={() => setOpen(o => !o)}
+        title="Open Assistant"
+      >
+        {listening ? "🎤" : open ? "✕" : "💬"}
+      </button>
+    </div>
+  );
+}
